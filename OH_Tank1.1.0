@@ -1,78 +1,136 @@
-#define SOUND_SPEED 0.034
-#define USE_CLIENTSSL false  
+#include <ESP8266WiFi.h>
+#include <ESP8266mDNS.h>
+#include <WiFiUdp.h>
+#include <ArduinoOTA.h>
+#include <WiFiClientSecure.h>
+#include <NTPClient.h>
+#include <UniversalTelegramBot.h>
+#include <TimeAlarms.h>
 
-#include <AsyncTelegram2.h>
-// Timezone definition
-#include <time.h>
-#define MYTZ "CET-1CEST,M3.5.0,M10.5.0/3"
+// Wifi network station credentials
+String WIFI_SSID = "XXXXXXXXXXX";
+String WIFI_PASSWORD = "XXXXXXXXXXXXXXXXX";
+// Telegram BOT Token (Get from Botfather)
+#define BOT_TOKEN "XXXXXXXXXXXXXXXXXXXXXXXXXX"
+#define CHAT_ID "XXXXXXXXXXXXXXX" 
+#define CHAT_ID2 "XXXXXXXXXXXXXXX"
+#define SAMPLE_SIZE 10
 
-#ifdef ESP8266 //incase of esp8266
-  #include <ESP8266WiFi.h>
-  BearSSL::WiFiClientSecure client;
-  BearSSL::Session   session;
-  BearSSL::X509List  certificate(telegram_cert);
-  
-#elif defined(ESP32) //incase of esp32
-  #include <WiFi.h>
-  #include <WiFiClient.h>
-  #if USE_CLIENTSSL
-    #include <SSLClient.h>  
-    #include "tg_certificate.h"
-    WiFiClient base_client;
-    SSLClient client(base_client, TAs, (size_t)TAs_NUM, A0, 1, SSLClient::SSL_ERROR);
-  #else
-    #include <WiFiClientSecure.h>
-    WiFiClientSecure client;    
-  #endif
-#endif
+X509List cert(TELEGRAM_CERTIFICATE_ROOT);
+WiFiClientSecure secured_client;
+UniversalTelegramBot bot(BOT_TOKEN, secured_client);
+unsigned long bot_lasttime; // last time messages' scan has been done 
 
+const unsigned long BOT_MTBS = 1000; // mean time between scan messages
 
-AsyncTelegram2 myBot(client);
-String ssid  =  "XXXXXXXXXXXXXXXXXXXX";     // SSID WiFi network
-String pass  =  "XXXXXXXXXXXXXXXXXXXXX";     // Password  WiFi network
-const char* token =  "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";  // Telegram token
+const int ledPin = LED_BUILTIN;
+const int trigPin = 14; //ultrasonic trig pin value
+const int echoPin = 12; //ultrasonic echo pin value
+const int humPin = 13; // analog soil moisture sensor pin value
+short int autontp=0;
+short int timearr[6] ={12, 0, 0, 2, 2, 2024};
+short int highest=20;
+short int lowest=60;
+short int humValue = 0; //stores analog value of humidity pin, 4095-dryest; 0-wettest
+short int flag=0;
+short int mes1,mes2,i,j;
+short int lvl1;
+short int tmes[SAMPLE_SIZE];
+char tstamp[SAMPLE_SIZE][10];
+char tstamp1[SAMPLE_SIZE][10];
 
-const int trigPin = 5; //ultrasonic trig pin value
-const int echoPin = 18; //ultrasonic echo pin value
-const int humPin = 34; // analog soil moisture sensor pin value
-unsigned long previousMillis = 0;  // will store last time LED was updated
-const long interval = 300000; // interval at which to blink (milliseconds) - set to 5 minutes
-int humValue = 0; //stores analog value of humidity pin, 4095-dryest; 0-wettest
+String chat_id;
+String text;
 
+WiFiUDP ntpUDP;
+NTPClient timeClient(ntpUDP, "pool.ntp.org");
 
-//function to get distance using ultrasonic sensor
-float ultrasonic(){
+void getReply(){ //function to get replies from user in case of reply-based options such as reboot, get_time, set_time etc
+  while(!(bot.getUpdates(bot.last_message_received+1))) { };
+  chat_id = String(bot.messages[0].chat_id);
+  text = bot.messages[0].text;
+}
+
+String digitalClockDisplay()
+{
+  String str="";
+  str+=String(hour());
+  str+=printDigits(minute());
+  str+=printDigits(second());
+  str+="\n";
+
+  return str;
+}
+
+String printDigits(int digits)
+{
+  String str="";
+  str+=":";
+  if(digits < 10)
+    str+="0";
+  str+=digits;
+
+  return str;
+}
+
+int ultrasonic(){ //returns distance as a float from the ultrasonic value
   long duration;
-  float distance;
+  int distance=0;
 
-  digitalWrite(trigPin, LOW);
-  delayMicroseconds(2);
-  digitalWrite(trigPin, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(trigPin, LOW);
+  for(int i=0;i<5;i++){
+    digitalWrite(trigPin, LOW);
+    delayMicroseconds(2);
+    digitalWrite(trigPin, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(trigPin, LOW);
 
-  duration = pulseIn(echoPin, HIGH);
-  distance = (duration*.0343)/2;
+    duration = pulseIn(echoPin, HIGH);
+    distance = distance + (int)((duration*0.0343)/2);
+  }
+
+  distance = distance/5;
+
+  
+  if(distance>lowest){
+    lowest=distance;
+  }
+  else if(distance<highest){
+    highest=distance;
+  }
+
   Serial.print("Distance: ");
   Serial.println(distance);
   return distance;
 }
 
-void netchange(TBMessage msg){
-  myBot.sendMessage(msg,"Enter new network SSID: ");
-  while(!myBot.getNewMessage(msg)) {}
-  ssid=msg.text;
-  myBot.sendMessage(msg,"Enter new network password: ");
-  while(!myBot.getNewMessage(msg)) {}
-  pass=msg.text;
-  myBot.sendMessage(msg,"Are you sure you want to reset with SSID: "+ssid+" and password: "+pass+" ?.\nEnter 'yes' to confirm and anything else to cancel");
-  while(!myBot.getNewMessage(msg)) {}
-  String conf=msg.text;
+int perConv(int dist){
+  return (int)(((lowest-dist)/(float)(lowest-highest))*100);
+}
+
+void netchange(String chat_id){
+  bot.sendMessage(chat_id, "Enter new network ID:","");
+  while(!(bot.getUpdates(bot.last_message_received+1))) { };
+  chat_id = String(bot.messages[0].chat_id);
+  String text = bot.messages[0].text;
+  WIFI_SSID=text;
+
+  bot.sendMessage(chat_id, "Enter new network password: ");
+  while(!(bot.getUpdates(bot.last_message_received+1))) { };
+  chat_id = String(bot.messages[0].chat_id);
+  text = bot.messages[0].text;
+  WIFI_PASSWORD=text;
+
+  bot.sendMessage(chat_id, "Are you sure you want to reset with SSID: "+WIFI_SSID+" and password: "+WIFI_PASSWORD+" ?.\nEnter 'yes' to confirm and anything else to cancel", "");
+  while(!(bot.getUpdates(bot.last_message_received+1))) { };
+  chat_id = String(bot.messages[0].chat_id);
+  text = bot.messages[0].text;
+  String conf=text;
+
   if(conf.equals("yes")){
-    myBot.sendMessage(msg, "Beginning Network Change");
+    bot.sendMessage(chat_id, "Beginning Network Change", "");
     setup();
   }
-  else myBot.sendMessage(msg, "Network Change Cancelled");
+  else bot.sendMessage(chat_id, "Network Change Cancelled", "");
 }
 
 String canner(){
@@ -91,7 +149,7 @@ String canner(){
       fin+=String(i+1);
       fin+=" : "+WiFi.SSID(i);
       fin+=" ("+String(WiFi.RSSI(i))+") ";
-      fin+=(WiFi.encryptionType(i)==WIFI_AUTH_OPEN ? "O" : "*");
+      fin+=(WiFi.encryptionType(i)==AUTH_OPEN ? "O" : "*");
       fin+="\n";
       delay(10);
     }
@@ -99,136 +157,297 @@ String canner(){
   }
 }
 
-void sleep_deep(TBMessage msg){
-  myBot.sendMessage(msg, "Enter duration of Deep Sleep (in seconds)");
-  while(!myBot.getNewMessage(msg)) {}
-  unsigned long int dur=msg.text.toInt();
-  Serial.println(dur);
-  myBot.sendMessage(msg, "ESP32 will sleep for "+msg.text+" seconds. Please confirm by typing 'yes'. Type anything else to cancel.");
-  while(!myBot.getNewMessage(msg)) {}
-  if(msg.text.equals("yes")){
-    esp_sleep_enable_timer_wakeup(dur * 1000000ULL);
-    esp_deep_sleep_start();
-  }
-  else {
-    myBot.sendMessage(msg, "Deep Sleep Cancelled");
+
+
+void handleNewMessages(int numNewMessages)
+{
+  for (int i = 0; i < numNewMessages; i++)
+  {
+    chat_id = bot.messages[i].chat_id;
+    text = bot.messages[i].text;
+
+    String from_name = bot.messages[i].from_name;
+    if (chat_id != CHAT_ID && chat_id != CHAT_ID2){
+      bot.sendMessage(chat_id, "Unauthorized User!", "");
+    }
+
+    if (text == "/check_level")
+    {
+      int distance = ultrasonic();
+      int p = perConv(distance);
+      bot.sendMessage(chat_id, "Distance(cm) of water from sensor is: "+String(distance)+"\nPercentage: "+String(p), "");
+    }
+
+    else if (text == "/check_motor")
+    {
+      String hums = String(analogRead(humPin));
+      bot.sendMessage(chat_id, "Water Sensor Value is: "+hums, "");
+    }
+
+    else if (text == "/change_network")
+    {
+      netchange(chat_id);
+    }
+
+    else if (text == "/network_details")
+    {
+      bot.sendMessage(chat_id, "SSID: "+WiFi.SSID()+" Strength: "+WiFi.RSSI(), "");
+    }
+
+    else if (text == "/network_scan")
+    {
+      bot.sendMessage(chat_id, canner(), "");
+    }
+
+    else if(text == "/calibrate_time"){
+      autontp=0;
+      setup();
+    }
+    
+    else if(text == "/get_lowest"){
+      bot.sendMessage(chat_id,"Lowest tank value(Distance from top) in cm:"+String(lowest),"");
+    }
+
+    else if(text == "/get_highest"){
+      bot.sendMessage(chat_id,"Highest tank value(Distance from top) in cm:"+String(highest),"");
+    }
+
+    else if(text == "/set_time"){
+      autontp=1;
+      bot.sendMessage(chat_id, "Enter <HH MM SS DD MM YYYY>: ","");
+      getReply();
+      String str = text;
+
+      bot.sendMessage(chat_id, "Entered Time is:\n"+str+"\nEnter 'YES' to confirm: ","");
+      getReply();
+
+      if(text == "YES"){
+        
+        int StringCount=0;
+        while (str.length() > 0){
+          int index = str.indexOf(' ');
+          if (index == -1) {
+            timearr[StringCount++] = str.toInt();
+            break;
+          }
+          else{
+            timearr[StringCount++] = str.substring(0, index).toInt();
+            str = str.substring(index+1);
+          }
+        }
+
+        setup();
+      }
+      else { bot.sendMessage(chat_id, "Exited... ",""); }
+    }
+
+    else if (text == "/get_time"){
+      bot.sendMessage(chat_id,digitalClockDisplay(),"");
+    }
+
+    else if (text == "/reboot"){
+      bot.sendMessage(chat_id, "Enter Authentication Code: ","");
+      getReply();
+      if(text=="ASHTOJO3643"){
+        bot.sendMessage(chat_id, "Rebooting now...");
+      }
+      else {
+        bot.sendMessage(chat_id, "Reboot Failed!");
+      }
+    }
+
+    else{
+      String welcome = "Welcome to the Overhead Tank Monitoring System, " + from_name + ".\n";
+      welcome += "/check_level\n";
+      welcome += "/check_motor\n";
+      welcome += "/get_time\n";
+      welcome += "/calibrate_time\n";
+      welcome += "/set_time\n";
+      welcome += "/change_network\n";
+      welcome += "/network_details\n";
+      welcome += "/network_scan\n";
+      bot.sendMessage(chat_id, welcome, "");
+    }
   }
 }
 
 
-void setup() {
-  TBMessage msg;
-  // initialize the Serial -esp32 operates at baud 115200
+void setup()
+{
   Serial.begin(115200);
+  Serial.println("Booting");
 
+  pinMode(ledPin, OUTPUT); // initialize digital ledPin as an output.
+  delay(10);
+  digitalWrite(ledPin, HIGH); // initialize pin as off (active LOW)
   pinMode(trigPin, OUTPUT); // Sets the trigPin as an Output
   pinMode(echoPin, INPUT); // Sets the echoPin as an Input
 
-  Serial.println("\nStarting TelegramBot...");
-  Serial.println("SSID:"+ssid);
-  Serial.println("Password:"+pass);
-
+  // attempt to connect to Wifi network:
   WiFi.mode(WIFI_STA);
-  WiFi.begin(ssid, pass); //connect to the specified wifi network
-  delay(500);
-  while (WiFi.status() != WL_CONNECTED) {
-    Serial.print('.');
-    delay(500);
+  configTime(I2ST, 330, "pool.ntp.org");      // get UTC time via NTP
+  secured_client.setTrustAnchors(&cert); // Add root certificate for api.telegram.org
+  Serial.print("Connecting to Wifi SSID ");
+  Serial.print(WIFI_SSID);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  int i=0;
+  while (WiFi.status() != WL_CONNECTED)
+  {
+    i++;
+    Serial.print(".");
+    delay(5000);
+    if(i==10){
+      WIFI_SSID = "XXXXXXXXXXXXXXXXX";  //default WIFI SSID incase of /net_change failure
+      WIFI_PASSWORD = "XXXXXXXXXXXXXXX"; //default WIFI Key
+
+      ESP.restart();
+    }
   }
-  Serial.println("");
-  Serial.print("Connected to WiFi network with IP Address: ");
+
+  ArduinoOTA.setPassword((const char *)"123");
+
+  ArduinoOTA.onStart([]() {
+    Serial.println("Start");
+  });
+  ArduinoOTA.onEnd([]() {
+    Serial.println("\nEnd");
+  });
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+  });
+  ArduinoOTA.onError([](ota_error_t error) {
+    Serial.printf("Error[%u]: ", error);
+    if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
+    else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
+    else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
+    else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
+    else if (error == OTA_END_ERROR) Serial.println("End Failed");
+  });
+
+  ArduinoOTA.begin();
+
+  Serial.print("\nWiFi connected. IP address: ");
   Serial.println(WiFi.localIP());
 
-  #ifdef ESP8266
-    // Sync time with NTP, to check properly Telegram certificate
-    configTime(MYTZ, "time.google.com", "time.windows.com", "pool.ntp.org");
-    //Set certficate, session and some other base client properies
-    client.setSession(&session);
-    client.setTrustAnchors(&certificate);
-    client.setBufferSizes(1024, 1024);
-  #elif defined(ESP32)
-    // Sync time with NTP
-    configTzTime(MYTZ, "time.google.com", "time.windows.com", "pool.ntp.org");
-    #if USE_CLIENTSSL == false
-      client.setCACert(telegram_cert);
-      #endif
-  #endif
+  timeClient.begin();
+  timeClient.setTimeOffset(19800);
 
-  do{
-	  myBot.setUpdateTime(1000);
-	  myBot.setTelegramToken(token);	
-	  Serial.print("\nTest Telegram connection... ");
-    myBot.begin() ? Serial.println("OK") : Serial.println("NOK");
-	
-	  Serial.print("Bot name: @");
-	  Serial.println(myBot.getBotName());
+  if(autontp==0){
+    timeClient.update();
 
-    myBot.sendMessage(msg, "Bot up and running");
-  }while(!myBot.begin());
+    time_t epochTime = timeClient.getEpochTime(); //epoch (UNIX) time i.e. time since Jan 1st 1970 considering Time Offset (19800 for IST)
 
-  
+    timearr[0] = timeClient.getHours(); //hours
+    timearr[1] = timeClient.getMinutes(); //minutes
+    timearr[2] = timeClient.getSeconds(); //seconds
+    
+    struct tm *ptm = gmtime((time_t*)&epochTime); //time structure to get Day, Month and Year
+
+    timearr[3] = ptm->tm_mday; //day
+    timearr[4] = ptm->tm_mon+1; //month 
+    timearr[5] = ptm->tm_year+1900; //year
+  }
+
+  setTime(timearr[0],timearr[1],timearr[2],timearr[3],timearr[4],timearr[5]);
+
+  bot.sendMessage(CHAT_ID, "Bot On","");
 }
 
-void loop() {
-  // local variable to store telegram message data
-  TBMessage msg;
+void loop()
+{
+  ArduinoOTA.handle();
+  if (millis() - bot_lasttime > BOT_MTBS)
+  {
+    int numNewMessages = bot.getUpdates(bot.last_message_received + 1);
 
-  unsigned long currentMillis = millis();
-
-  if (currentMillis - previousMillis >= interval) {//checks if time between last updates millis and current millis is greater than time interval specified
+    humValue = analogRead(humPin);
     
-    previousMillis = currentMillis;//sets the last time millis was updated to the current millis
-    humValue = analogRead(humPin);//reads analog value from Humidity pin
 
-    if(humValue<2500){
-      String distance= String(ultrasonic());
-      myBot.sendMessage(msg, "Motor has been turned on. Distance(cm) of water from sensor is "+distance);
+    if(humValue==0){
+      if(flag==0){
+        String mess = "Motor has been turned on!\nDistance of water is: ";
+        flag=1;
+
+        for(i=0;i<SAMPLE_SIZE;i++){
+          tmes[i]=0;
+          tstamp[i][0]='\0';
+          tstamp1[i][0]='\0';
+        }
+        
+        i=0;
+        j=0;
+
+        mes1=ultrasonic();
+        lvl1=mes1;
+        int p = perConv(mes1);
+        bot.sendMessage(CHAT_ID,mess+String(mes1)+"\nPercentage: "+String(p),"");
+        bot.sendMessage(CHAT_ID2,mess+String(mes1)+"\nPercentage: "+String(p),"");
+        delay(1000);
+      }
+
+      mes2=ultrasonic();
+      if(mes2-mes1==5 && j<SAMPLE_SIZE){
+
+        strcpy(tstamp1[j++],digitalClockDisplay().c_str());
+      }
+
+      if(mes2<mes1 && tmes[i]!=1 && i<20){
+        i++;
+        tmes[i]=1;
+        strcpy(tstamp[i],digitalClockDisplay().c_str());
+      }
+      else if(mes2>mes1 && tmes[i]!=-1 && i<20){
+        i++;
+        tmes[i]=-1;
+        strcpy(tstamp[i],digitalClockDisplay().c_str());
+      }
+      else if(mes2==mes1 && tmes[i]!=0 && i<20){
+        i++;
+        tmes[i]=0; 
+        strcpy(tstamp[i],digitalClockDisplay().c_str());
+      }
+      mes1=ultrasonic();
+      delay(20); 
     }
+
+    if(humValue==1023 && flag==1){
+      int d = ultrasonic();
+      int p = perConv(d);
+      bot.sendMessage(CHAT_ID,"Motor has been turned off! Level is: "+String(d)+"\nPercentage: "+String(p),"");
+      bot.sendMessage(CHAT_ID2,"Motor has been turned off! Level is: "+String(d)+"\nPercentage: "+String(p),"");
+      String mess = "Level Change: \n";
+      flag=0;
+
+      for(int count=0;count<=i;count++){
+        if(tmes[count]==1) { mess+="Increasing\n"; }
+        else if(tmes[count]==-1) { mess+="Decreasing\n"; }
+        else if(tmes[count]==0) { mess+="Constant\n"; }
+      }
+
+      i=0;
+
+      bot.sendMessage(CHAT_ID,mess,"");
+      bot.sendMessage(CHAT_ID2,mess,"");
+
+      
+      mess = "";
+      for(int count=0;count<=j;count++){
+        mess += "Level: "+String(lvl1)+"==> Time: "+tstamp1[count]+"\n";
+        lvl1 = lvl1+5;
+      }
+      j=0;
+
+      bot.sendMessage(CHAT_ID,mess,"");
+      bot.sendMessage(CHAT_ID2,mess,"");
+    }
+
+    while (numNewMessages)
+    {
+      Serial.println("got response");
+      handleNewMessages(numNewMessages);
+      numNewMessages = bot.getUpdates(bot.last_message_received + 1);
+    }
+
+    bot_lasttime = millis();
   }
-  
-  // if there is an incoming message...
-  if (myBot.getNewMessage(msg)) {
-    String msgText = msg.text;
-
-    if (msgText.equals("/check_level")) {                 // if the received message is "LIGHT ON"...
-      String distance= String(ultrasonic());
-      myBot.sendMessage(msg, "Distance(cm) of water from sensor is: "+distance);       // notify the sender
-    }
-    else if(msgText.equals("/check_motor")){
-      String hums = String(analogRead(humPin));
-      myBot.sendMessage(msg, "Water Sensor Value is: "+hums);
-    }
-    else if(msgText.equals("/change_network")) {
-      netchange(msg);
-    }
-    else if(msgText.equals("/network_details")) {
-      myBot.sendMessage(msg, "SSID: "+WiFi.SSID()+" Strength: "+WiFi.RSSI());
-    }
-    else if(msgText.equals("/network_scan")){
-      myBot.sendMessage(msg, canner());
-    }
-    else if(msgText.equals("/deep_sleep")){
-      sleep_deep(msg);
-    }
-    else if(msgText.equals("/battery_lvl")){
-      float batteryLevel = map(analogRead(32), 0.0f, 4095.0f, 0, 100);
-      myBot.sendMessage(msg, "Battery at "+String(batteryLevel)+"%");
-    }
-    else {                                              // otherwise...
-      // generate the message for the sender
-      String reply;
-      reply = "Welcome " ;
-      reply += msg.sender.username;
-      reply += ".\nList of Commands: \n";
-      reply += "/check_level \n";
-      reply += "/check_motor \n";
-      reply += "/change_network \n";
-      reply += "/network_details \n";
-      reply += "/network_scan \n";
-      reply += "/deep_sleep \n";
-      reply += "/battery_lvl \n";
-      myBot.sendMessage(msg, reply);                    // and send it
-    }
-  }
-
 }
