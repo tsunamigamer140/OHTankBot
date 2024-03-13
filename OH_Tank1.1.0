@@ -28,8 +28,8 @@
 
 
 AsyncTelegram2 myBot(client);
-String ssid  =  "XXXXXXXXXXXXXX";     // SSID WiFi network
-String pass  =  "XXXXXXXXXXXXXX";     // Password  WiFi network
+String ssid  =  "XXXXXXXXXXXXXXXXXXXX";     // SSID WiFi network
+String pass  =  "XXXXXXXXXXXXXXXXXXXXX";     // Password  WiFi network
 const char* token =  "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";  // Telegram token
 
 const int trigPin = 5; //ultrasonic trig pin value
@@ -58,20 +58,60 @@ float ultrasonic(){
   return distance;
 }
 
-void netchange(){
-  TBMessage msg;
-
-  myBot.sendMessage(msg, "Enter new network SSID: ");
+void netchange(TBMessage msg){
+  myBot.sendMessage(msg,"Enter new network SSID: ");
   while(!myBot.getNewMessage(msg)) {}
   ssid=msg.text;
   myBot.sendMessage(msg,"Enter new network password: ");
   while(!myBot.getNewMessage(msg)) {}
   pass=msg.text;
-  myBot.sendMessage(msg,"Are you sure you want to reset with ssid: "+ssid+" and password: "+pass+" ?. Enter 'yes' to confirm and anything else to cancel");
+  myBot.sendMessage(msg,"Are you sure you want to reset with SSID: "+ssid+" and password: "+pass+" ?.\nEnter 'yes' to confirm and anything else to cancel");
   while(!myBot.getNewMessage(msg)) {}
   String conf=msg.text;
   if(conf.equals("yes")){
+    myBot.sendMessage(msg, "Beginning Network Change");
     setup();
+  }
+  else myBot.sendMessage(msg, "Network Change Cancelled");
+}
+
+String canner(){
+  Serial.println("Scan start");
+
+  // WiFi.scanNetworks will return the number of networks found
+  int n = WiFi.scanNetworks();
+  String ns = String(n);
+  String fin;
+  Serial.println("Scan done");
+  if (n == 0) {
+      return ("No Networks Found");
+  } else {
+    fin=(String(n)+" Networks Found: \n");
+    for (int i = 0; i < n; ++i) {
+      fin+=String(i+1);
+      fin+=" : "+WiFi.SSID(i);
+      fin+=" ("+String(WiFi.RSSI(i))+") ";
+      fin+=(WiFi.encryptionType(i)==WIFI_AUTH_OPEN ? "O" : "*");
+      fin+="\n";
+      delay(10);
+    }
+    return fin;
+  }
+}
+
+void sleep_deep(TBMessage msg){
+  myBot.sendMessage(msg, "Enter duration of Deep Sleep (in seconds)");
+  while(!myBot.getNewMessage(msg)) {}
+  unsigned long int dur=msg.text.toInt();
+  Serial.println(dur);
+  myBot.sendMessage(msg, "ESP32 will sleep for "+msg.text+" seconds. Please confirm by typing 'yes'. Type anything else to cancel.");
+  while(!myBot.getNewMessage(msg)) {}
+  if(msg.text.equals("yes")){
+    esp_sleep_enable_timer_wakeup(dur * 1000000ULL);
+    esp_deep_sleep_start();
+  }
+  else {
+    myBot.sendMessage(msg, "Deep Sleep Cancelled");
   }
 }
 
@@ -122,9 +162,11 @@ void setup() {
 	
 	  Serial.print("Bot name: @");
 	  Serial.println(myBot.getBotName());
+
+    myBot.sendMessage(msg, "Bot up and running");
   }while(!myBot.begin());
 
-  myBot.sendMessage(msg, "Bot up and running");
+  
 }
 
 void loop() {
@@ -152,15 +194,39 @@ void loop() {
       String distance= String(ultrasonic());
       myBot.sendMessage(msg, "Distance(cm) of water from sensor is: "+distance);       // notify the sender
     }
+    else if(msgText.equals("/check_motor")){
+      String hums = String(analogRead(humPin));
+      myBot.sendMessage(msg, "Water Sensor Value is: "+hums);
+    }
     else if(msgText.equals("/change_network")) {
-      netchange();
+      netchange(msg);
+    }
+    else if(msgText.equals("/network_details")) {
+      myBot.sendMessage(msg, "SSID: "+WiFi.SSID()+" Strength: "+WiFi.RSSI());
+    }
+    else if(msgText.equals("/network_scan")){
+      myBot.sendMessage(msg, canner());
+    }
+    else if(msgText.equals("/deep_sleep")){
+      sleep_deep(msg);
+    }
+    else if(msgText.equals("/battery_lvl")){
+      float batteryLevel = map(analogRead(32), 0.0f, 4095.0f, 0, 100);
+      myBot.sendMessage(msg, "Battery at "+String(batteryLevel)+"%");
     }
     else {                                              // otherwise...
       // generate the message for the sender
       String reply;
       reply = "Welcome " ;
       reply += msg.sender.username;
-      reply += ".\nTry /check_level or /change_network";
+      reply += ".\nList of Commands: \n";
+      reply += "/check_level \n";
+      reply += "/check_motor \n";
+      reply += "/change_network \n";
+      reply += "/network_details \n";
+      reply += "/network_scan \n";
+      reply += "/deep_sleep \n";
+      reply += "/battery_lvl \n";
       myBot.sendMessage(msg, reply);                    // and send it
     }
   }
