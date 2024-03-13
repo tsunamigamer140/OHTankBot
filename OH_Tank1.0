@@ -1,0 +1,168 @@
+#define SOUND_SPEED 0.034
+#define USE_CLIENTSSL false  
+
+#include <AsyncTelegram2.h>
+// Timezone definition
+#include <time.h>
+#define MYTZ "CET-1CEST,M3.5.0,M10.5.0/3"
+
+#ifdef ESP8266 //incase of esp8266
+  #include <ESP8266WiFi.h>
+  BearSSL::WiFiClientSecure client;
+  BearSSL::Session   session;
+  BearSSL::X509List  certificate(telegram_cert);
+  
+#elif defined(ESP32) //incase of esp32
+  #include <WiFi.h>
+  #include <WiFiClient.h>
+  #if USE_CLIENTSSL
+    #include <SSLClient.h>  
+    #include "tg_certificate.h"
+    WiFiClient base_client;
+    SSLClient client(base_client, TAs, (size_t)TAs_NUM, A0, 1, SSLClient::SSL_ERROR);
+  #else
+    #include <WiFiClientSecure.h>
+    WiFiClientSecure client;    
+  #endif
+#endif
+
+
+AsyncTelegram2 myBot(client);
+String ssid  =  "XXXXXXXXXXXXXX";     // SSID WiFi network
+String pass  =  "XXXXXXXXXXXXXX";     // Password  WiFi network
+const char* token =  "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";  // Telegram token
+
+const int trigPin = 5; //ultrasonic trig pin value
+const int echoPin = 18; //ultrasonic echo pin value
+const int humPin = 34; // analog soil moisture sensor pin value
+unsigned long previousMillis = 0;  // will store last time LED was updated
+const long interval = 300000; // interval at which to blink (milliseconds) - set to 5 minutes
+int humValue = 0; //stores analog value of humidity pin, 4095-dryest; 0-wettest
+
+
+//function to get distance using ultrasonic sensor
+float ultrasonic(){
+  long duration;
+  float distance;
+
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+
+  duration = pulseIn(echoPin, HIGH);
+  distance = (duration*.0343)/2;
+  Serial.print("Distance: ");
+  Serial.println(distance);
+  return distance;
+}
+
+void netchange(){
+  TBMessage msg;
+
+  myBot.sendMessage(msg, "Enter new network SSID: ");
+  while(!myBot.getNewMessage(msg)) {}
+  ssid=msg.text;
+  myBot.sendMessage(msg,"Enter new network password: ");
+  while(!myBot.getNewMessage(msg)) {}
+  pass=msg.text;
+  myBot.sendMessage(msg,"Are you sure you want to reset with ssid: "+ssid+" and password: "+pass+" ?. Enter 'yes' to confirm and anything else to cancel");
+  while(!myBot.getNewMessage(msg)) {}
+  String conf=msg.text;
+  if(conf.equals("yes")){
+    setup();
+  }
+}
+
+
+void setup() {
+  TBMessage msg;
+  // initialize the Serial -esp32 operates at baud 115200
+  Serial.begin(115200);
+
+  pinMode(trigPin, OUTPUT); // Sets the trigPin as an Output
+  pinMode(echoPin, INPUT); // Sets the echoPin as an Input
+
+  Serial.println("\nStarting TelegramBot...");
+  Serial.println("SSID:"+ssid);
+  Serial.println("Password:"+pass);
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, pass); //connect to the specified wifi network
+  delay(500);
+  while (WiFi.status() != WL_CONNECTED) {
+    Serial.print('.');
+    delay(500);
+  }
+  Serial.println("");
+  Serial.print("Connected to WiFi network with IP Address: ");
+  Serial.println(WiFi.localIP());
+
+  #ifdef ESP8266
+    // Sync time with NTP, to check properly Telegram certificate
+    configTime(MYTZ, "time.google.com", "time.windows.com", "pool.ntp.org");
+    //Set certficate, session and some other base client properies
+    client.setSession(&session);
+    client.setTrustAnchors(&certificate);
+    client.setBufferSizes(1024, 1024);
+  #elif defined(ESP32)
+    // Sync time with NTP
+    configTzTime(MYTZ, "time.google.com", "time.windows.com", "pool.ntp.org");
+    #if USE_CLIENTSSL == false
+      client.setCACert(telegram_cert);
+      #endif
+  #endif
+
+  do{
+	  myBot.setUpdateTime(1000);
+	  myBot.setTelegramToken(token);	
+	  Serial.print("\nTest Telegram connection... ");
+    myBot.begin() ? Serial.println("OK") : Serial.println("NOK");
+	
+	  Serial.print("Bot name: @");
+	  Serial.println(myBot.getBotName());
+  }while(!myBot.begin());
+
+  myBot.sendMessage(msg, "Bot up and running");
+}
+
+void loop() {
+  // local variable to store telegram message data
+  TBMessage msg;
+
+  unsigned long currentMillis = millis();
+
+  if (currentMillis - previousMillis >= interval) {//checks if time between last updates millis and current millis is greater than time interval specified
+    
+    previousMillis = currentMillis;//sets the last time millis was updated to the current millis
+    humValue = analogRead(humPin);//reads analog value from Humidity pin
+
+    if(humValue<2500){
+      String distance= String(ultrasonic());
+      myBot.sendMessage(msg, "Motor has been turned on. Distance(cm) of water from sensor is "+distance);
+    }
+  }
+  
+  // if there is an incoming message...
+  if (myBot.getNewMessage(msg)) {
+    String msgText = msg.text;
+
+    if (msgText.equals("/check_level")) {                 // if the received message is "LIGHT ON"...
+      String distance= String(ultrasonic());
+      myBot.sendMessage(msg, "Distance(cm) of water from sensor is: "+distance);       // notify the sender
+    }
+    else if(msgText.equals("/change_network")) {
+      netchange();
+    }
+    else {                                              // otherwise...
+      // generate the message for the sender
+      String reply;
+      reply = "Welcome " ;
+      reply += msg.sender.username;
+      reply += ".\nTry /check_level or /change_network";
+      myBot.sendMessage(msg, reply);                    // and send it
+    }
+  }
+
+}
